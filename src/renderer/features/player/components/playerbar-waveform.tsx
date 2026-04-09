@@ -10,6 +10,7 @@ import { useSongUrl } from '/@/renderer/features/player/audio-player/hooks/use-s
 import { PlayerbarSeekSlider } from '/@/renderer/features/player/components/playerbar-seek-slider';
 import { usePlayer } from '/@/renderer/features/player/context/player-context';
 import { BarAlign, usePlayerbarSlider, usePlayerSong, usePlayerTimestamp } from '/@/renderer/store';
+import { useDlnaDuration } from '/@/renderer/store/dlna-duration.store';
 import { useAppThemeColors, useColorScheme } from '/@/renderer/themes/use-app-theme';
 import { Text } from '/@/shared/components/text/text';
 
@@ -28,7 +29,12 @@ export const PlayerbarWaveform = () => {
     const lastSeekValueRef = useRef<null | number>(null);
     const containerPositionRef = useRef<DOMRect | null>(null);
 
-    const songDuration = currentSong?.duration ? currentSong.duration / 1000 : 0;
+    const dlnaDuration = useDlnaDuration();
+    const songDuration = dlnaDuration
+        ? dlnaDuration / 1000
+        : currentSong?.duration
+          ? currentSong.duration / 1000
+          : 0;
 
     const streamUrl = useSongUrl(currentSong, true, { bitrate: 64, enabled: false, format: 'mp3' });
 

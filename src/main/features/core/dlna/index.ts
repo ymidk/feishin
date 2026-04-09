@@ -49,6 +49,7 @@ let lastCommandedUri = '';
 let lastQueuedNextUri = '';
 let lastAppSeekAt = 0;
 let pendingPrevTrack = false;
+let lastPlayCommandAt = 0;
 let isRadioMode = false;
 let groupMembers: DlnaDevice[] = [];
 let groupMemberVolumes: Record<string, number> = {};
@@ -59,6 +60,8 @@ let eventServerPort = 0;
 let subscriptionSid: null | string = null;
 let subscriptionRenewalTimeout: NodeJS.Timeout | null = null;
 let topologyPollingInterval: NodeJS.Timeout | null = null;
+let lastKnownDuration = 0;
+let nearEndStallCount = 0;
 
 function getLanIp(): null | string {
     const interfaces = os.networkInterfaces();
@@ -491,7 +494,8 @@ function startPositionPolling() {
     positionPollingInterval = setInterval(async () => {
         if (!connectedDevice) return;
         // Don't poll during the first few seconds after loading a track
-        if (Date.now() - trackLoadedAt < 50) return;
+        const timeSinceLoad = Date.now() - trackLoadedAt;
+        if (timeSinceLoad < 3000) return;
         // Started polling much sooner, most of the failed DLNA commands I've seen occurred earlier than this, and position info
         // early in the song is good. I tested with a few configurations, this works well, I believe.
         try {
@@ -500,6 +504,9 @@ function startPositionPolling() {
                 getTransportInfo(connectedDevice),
             ]);
             getMainWindow()?.webContents.send('renderer-dlna-current-time', posInfo.position);
+            if (posInfo.duration > 0) {
+                getMainWindow()?.webContents.send('renderer-dlna-duration', posInfo.duration);
+            }
             // Track that playback has started
             if (transportState === 'PLAYING' || transportState === 'TRANSITIONING')
                 hasStartedPlaying = true;
@@ -553,11 +560,54 @@ function startPositionPolling() {
                     );
                     pendingPrevTrack = true;
                 }
-                if (hasStartedPlaying && transportState === 'STOPPED') {
+                // Detect gapless transition via URI change (needed on macOS where event subscription is unavailable)
+                if (
+                    hasStartedPlaying &&
+                    uriReportedByDevice &&
+                    lastCommandedUri &&
+                    posInfo.trackUri !== lastCommandedUri
+                ) {
+                    dlnaLog(
+                        `Gapless transition detected (URI change): ${lastCommandedUri} -> ${posInfo.trackUri}`,
+                    );
+                    lastCommandedUri = posInfo.trackUri;
+                    lastQueuedNextUri = '';
+                    hasStartedPlaying = true;
+                    trackLoadedAt = Date.now();
+                    lastKnownPosition = 0;
+                    pendingPrevTrack = false;
+                    getMainWindow()?.webContents.send('renderer-dlna-track-ended');
+                }
+                if (posInfo.duration > 0) lastKnownDuration = posInfo.duration;
+                // Detect stuck-at-end: position pinned near duration without advancing
+                if (
+                    hasStartedPlaying &&
+                    lastKnownDuration > 0 &&
+                    posInfo.position > 0 &&
+                    posInfo.position >= lastKnownDuration - 2 &&
+                    Math.abs(posInfo.position - previousPosition) < 0.5 &&
+                    !recentAppSeek
+                ) {
+                    nearEndStallCount += 1;
+                    if (nearEndStallCount >= 3) {
+                        dlnaLog(
+                            `Stuck-at-end detected (${posInfo.position}/${lastKnownDuration}), advancing`,
+                        );
+                        nearEndStallCount = 0;
+                        hasStartedPlaying = false;
+                        lastKnownDuration = 0;
+                        trackLoadedAt = Date.now();
+                        getMainWindow()?.webContents.send('renderer-dlna-track-ended', 'stopped');
+                    }
+                } else {
+                    nearEndStallCount = 0;
+                }
+                const recentPlayCommand = Date.now() - lastPlayCommandAt < 4000;
+                if (hasStartedPlaying && transportState === 'STOPPED' && !recentPlayCommand) {
                     pendingPrevTrack = false;
                     dlnaLog('Track ended (stopped), advancing queue');
                     hasStartedPlaying = false;
-                    getMainWindow()?.webContents.send('renderer-dlna-track-ended');
+                    getMainWindow()?.webContents.send('renderer-dlna-track-ended', 'stopped');
                 }
             } else if (hasStartedPlaying && transportState === 'STOPPED') {
                 hasStartedPlaying = false;
@@ -787,8 +837,11 @@ ipcMain.handle('dlna-connect', async (_event, device: DlnaDevice) => {
         startPositionPolling();
         startTopologyPolling();
         refreshTopology();
-        await startEventSubscription(device);
-        await startTopologySubscription(device);
+        // Event subscription uses Node http.request which is blocked by macOS sandbox
+        if (process.platform !== 'darwin') {
+            await startEventSubscription(device);
+            await startTopologySubscription(device);
+        }
         dlnaLog(`Connected to ${device.name}`);
         // Get current volume from device to sync UI
         let deviceVolume = 50;
@@ -931,6 +984,8 @@ ipcMain.on('dlna-play-url', async (_event, data: { metadata: TrackMetadata; url:
         lastKnownPosition = 0;
         lastAppSeekAt = 0;
         trackLoadedAt = Date.now();
+        lastKnownDuration = 0;
+        nearEndStallCount = 0;
         const lanUrl = rewriteUrlForLan(data.url);
         lastCommandedUri = lanUrl;
         lastQueuedNextUri = '';
@@ -938,8 +993,11 @@ ipcMain.on('dlna-play-url', async (_event, data: { metadata: TrackMetadata; url:
             ? rewriteUrlForLan(data.metadata.albumArtUrl)
             : undefined;
         const metadata = { ...data.metadata, albumArtUrl: lanArtUrl };
+        lastPlayCommandAt = Date.now();
         await setAVTransportURI(device, lanUrl, metadata);
-        await waitForTransportState(device, ['STOPPED', 'PAUSED_PLAYBACK'], 1500);
+        if (process.platform !== 'darwin') {
+            await waitForTransportState(device, ['STOPPED', 'PAUSED_PLAYBACK'], 1500);
+        }
         await play(device);
         dlnaLog(`Playing: ${data.metadata.title}`);
     } catch (err) {

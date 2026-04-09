@@ -10,6 +10,7 @@ import {
     usePlayerSong,
     usePlayerTimestamp,
 } from '/@/renderer/store';
+import { useDlnaDuration } from '/@/renderer/store/dlna-duration.store';
 import { PlayerbarSliderType, usePlayerbarSlider } from '/@/renderer/store/settings.store';
 import { Slider, SliderProps } from '/@/shared/components/slider/slider';
 import { Spinner } from '/@/shared/components/spinner/spinner';
@@ -26,7 +27,12 @@ export const PlayerbarSlider = () => {
     const currentSong = usePlayerSong();
     const playerbarSlider = usePlayerbarSlider();
 
-    const songDuration = currentSong?.duration ? currentSong.duration / 1000 : 0;
+    const dlnaDuration = useDlnaDuration();
+    const songDuration = dlnaDuration
+        ? dlnaDuration / 1000
+        : currentSong?.duration
+          ? currentSong.duration / 1000
+          : 0;
     const currentTime = usePlayerTimestamp();
 
     const formattedDuration = formatDuration(songDuration * 1000 || 0);
